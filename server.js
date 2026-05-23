@@ -60,10 +60,13 @@ async function mapWithConcurrency(items, limit, fn) {
 }
 
 /** Get a discussion page's self-contained HTML, using the bounded cache. */
-async function getEntryHtml(id, commentsUrl) {
+async function getEntryHtml(id, commentsUrl, pageOpts) {
   const cached = entryCache.get(id);
   if (cached) return cached;
-  const html = await buildSelfContainedPage(commentsUrl, { maxAssetBytes: MAX_ASSET_BYTES });
+  const html = await buildSelfContainedPage(commentsUrl, {
+    maxAssetBytes: MAX_ASSET_BYTES,
+    ...pageOpts,
+  });
   entryCache.set(id, html);
   return html;
 }
@@ -132,7 +135,9 @@ async function buildFeedXml(feed, selfUrl) {
   await mapWithConcurrency(items, FETCH_CONCURRENCY, async (item) => {
     if (!item.commentsUrl) return;
     try {
-      item.contentHtml = await getEntryHtml(item.id, item.commentsUrl);
+      item.contentHtml = await getEntryHtml(item.id, item.commentsUrl, {
+        compactIndent: feed.compactIndent,
+      });
     } catch (err) {
       console.error(`Failed to render ${item.id} (${item.commentsUrl}): ${err.message}`);
       // Leave contentHtml unset; the item still appears with its original
