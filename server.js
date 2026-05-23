@@ -28,8 +28,14 @@ const FETCH_CONCURRENCY = parseInt(process.env.FETCH_CONCURRENCY || '3', 10);
 const entryCache = new BoundedCache({ maxEntries: ENTRY_MAX, ttlMs: ENTRY_TTL_MS });
 
 // Optional L2 cache that survives serverless cold starts (see lib/kvstore.js).
-// Disabled automatically when its env vars are absent.
-const entryStore = createKvStore({ keyPrefix: 'offlinerss:entry:', ttlMs: ENTRY_TTL_MS });
+// Disabled automatically when its env vars are absent. The deploy's git commit
+// (injected by Vercel) namespaces the keys, so a new deploy starts with a fresh
+// cache and never serves HTML rendered by older code; stale keys expire by TTL.
+const RENDER_VERSION = (process.env.VERCEL_GIT_COMMIT_SHA || 'dev').slice(0, 7);
+const entryStore = createKvStore({
+  keyPrefix: `offlinerss:${RENDER_VERSION}:entry:`,
+  ttlMs: ENTRY_TTL_MS,
+});
 
 // feedKey -> { xml, builtAt }. Short-lived so we don't re-fetch/re-parse the
 // source feed on every request, while still refreshing periodically.
