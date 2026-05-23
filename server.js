@@ -39,7 +39,7 @@ const feedCache = new Map();
 // highly compressible; gzip cuts the wire transfer ~7x.
 app.use(compression());
 
-// Health check is exempt from the secret so container orchestration can probe it.
+// Health check is exempt from the secret so uptime monitors can probe it.
 app.get('/health', (_req, res) => res.type('text/plain').send('ok'));
 
 // Auth middleware - require ?secret=xxx (mirrors tpcal).
@@ -205,7 +205,7 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Start a listener only when run directly (Docker / local). On serverless hosts
+// Start a listener only when run directly (local dev). On serverless hosts
 // the platform imports the exported app and invokes it per request instead.
 if (require.main === module) {
   app.listen(PORT, () => {
