@@ -1,6 +1,7 @@
 'use strict';
 
 const express = require('express');
+const compression = require('compression');
 const { BoundedCache } = require('./lib/cache');
 const { buildSelfContainedPage } = require('./lib/inline');
 const { FEEDS, fetchSourceItems } = require('./lib/feeds');
@@ -15,7 +16,6 @@ if (!SECRET) {
 }
 
 // Tunables (all optional, with sensible defaults).
-const MAX_ITEMS = parseInt(process.env.MAX_ITEMS || '25', 10);
 const ENTRY_TTL_MS = parseInt(process.env.ENTRY_TTL_MS || String(24 * 60 * 60 * 1000), 10);
 const ENTRY_MAX = parseInt(process.env.ENTRY_MAX || '500', 10);
 const FEED_TTL_MS = parseInt(process.env.FEED_TTL_MS || String(30 * 60 * 1000), 10);
@@ -30,6 +30,10 @@ const entryCache = new BoundedCache({ maxEntries: ENTRY_MAX, ttlMs: ENTRY_TTL_MS
 // feedKey -> { xml, builtAt }. Short-lived so we don't re-fetch/re-parse the
 // source feed on every request, while still refreshing periodically.
 const feedCache = new Map();
+
+// Each item repeats the same stylesheets, so the assembled feed is large but
+// highly compressible; gzip cuts the wire transfer ~7x.
+app.use(compression());
 
 // Health check is exempt from the secret so container orchestration can probe it.
 app.get('/health', (_req, res) => res.type('text/plain').send('ok'));
@@ -122,8 +126,8 @@ function buildRss(feed, items, selfUrl) {
 }
 
 async function buildFeedXml(feed, selfUrl) {
-  const sourceItems = await fetchSourceItems(feed);
-  const items = sourceItems.slice(0, MAX_ITEMS);
+  // Return as many items as the source feed contains.
+  const items = await fetchSourceItems(feed);
 
   await mapWithConcurrency(items, FETCH_CONCURRENCY, async (item) => {
     if (!item.commentsUrl) return;
