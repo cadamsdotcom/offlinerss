@@ -3,7 +3,7 @@
 const express = require('express');
 const compression = require('compression');
 const { BoundedCache } = require('./lib/cache');
-const { renderDiscussion } = require('./lib/render');
+const { renderDiscussion, renderFallback } = require('./lib/render');
 const { FEEDS, fetchSourceItems } = require('./lib/feeds');
 
 const app = express();
@@ -130,17 +130,20 @@ async function buildFeedXml(feed, selfUrl) {
 
   await mapWithConcurrency(items, FETCH_CONCURRENCY, async (item) => {
     if (!item.commentsUrl) return;
+    const story = {
+      title: item.title,
+      link: item.link,
+      author: item.author,
+      pubDate: item.pubDate,
+    };
     try {
-      item.contentHtml = await getEntryHtml(item.id, item.commentsUrl, feed.key, {
-        title: item.title,
-        link: item.link,
-        author: item.author,
-        pubDate: item.pubDate,
-      });
+      item.contentHtml = await getEntryHtml(item.id, item.commentsUrl, feed.key, story);
     } catch (err) {
       console.error(`Failed to render ${item.id} (${item.commentsUrl}): ${err.message}`);
-      // Leave contentHtml unset; the item still appears with its original
-      // description and link so the feed never fully fails on one bad page.
+      // Surface the failure in the entry itself (with links out) instead of
+      // silently falling back to a bare description, so it's diagnosable.
+      // Not cached: the next build retries and may succeed (e.g. after a 429).
+      item.contentHtml = renderFallback(item.commentsUrl, feed.key, story, err);
     }
   });
 
