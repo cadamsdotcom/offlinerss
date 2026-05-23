@@ -4,7 +4,7 @@ const express = require('express');
 const compression = require('compression');
 const { BoundedCache } = require('./lib/cache');
 const { createKvStore } = require('./lib/kvstore');
-const { renderDiscussion, renderFallback } = require('./lib/render');
+const { renderDiscussion, renderArticle, renderFallback } = require('./lib/render');
 const { FEEDS, fetchSourceItems } = require('./lib/feeds');
 
 const app = express();
@@ -74,7 +74,7 @@ async function mapWithConcurrency(items, limit, fn) {
  * the persistent KV store (L2) if configured, and only re-renders on a full
  * miss — populating both layers so later builds and cold starts reuse it.
  */
-async function getEntryHtml(id, commentsUrl, feedKey, story) {
+async function getEntryHtml(id, targetUrl, feed, story) {
   const local = entryCache.get(id);
   if (local) return local;
   const remote = await entryStore.get(id);
@@ -82,7 +82,10 @@ async function getEntryHtml(id, commentsUrl, feedKey, story) {
     entryCache.set(id, remote);
     return remote;
   }
-  const html = await renderDiscussion(commentsUrl, feedKey, story);
+  const html =
+    feed.mode === 'article'
+      ? await renderArticle(targetUrl, feed.key, story)
+      : await renderDiscussion(targetUrl, feed.key, story);
   entryCache.set(id, html);
   await entryStore.set(id, html);
   return html;
@@ -150,21 +153,25 @@ async function buildFeedXml(feed, selfUrl) {
   const items = await fetchSourceItems(feed);
 
   await mapWithConcurrency(items, FETCH_CONCURRENCY, async (item) => {
-    if (!item.commentsUrl) return;
+    // Discussion feeds render the comments page; reader feeds render the
+    // article the story links to.
+    const targetUrl = feed.mode === 'article' ? item.link : item.commentsUrl;
+    if (!targetUrl) return;
     const story = {
       title: item.title,
       link: item.link,
       author: item.author,
       pubDate: item.pubDate,
+      commentsUrl: item.commentsUrl,
     };
     try {
-      item.contentHtml = await getEntryHtml(item.id, item.commentsUrl, feed.key, story);
+      item.contentHtml = await getEntryHtml(item.id, targetUrl, feed, story);
     } catch (err) {
-      console.error(`Failed to render ${item.id} (${item.commentsUrl}): ${err.message}`);
+      console.error(`Failed to render ${item.id} (${targetUrl}): ${err.message}`);
       // Surface the failure in the entry itself (with links out) instead of
       // silently falling back to a bare description, so it's diagnosable.
       // Not cached: the next build retries and may succeed (e.g. after a 429).
-      item.contentHtml = renderFallback(item.commentsUrl, feed.key, story, err);
+      item.contentHtml = renderFallback(targetUrl, feed.key, story, err);
     }
   });
 
@@ -199,7 +206,9 @@ app.get('/', (req, res) => {
   const s = req.query.secret;
   res.send(`
     <h1>offlinerss</h1>
-    <p>HN and Lobsters feeds with discussion pages embedded for offline reading.</p>
+    <p>HN and Lobsters feeds for offline reading. The <em>(offline)</em> feeds embed
+    the discussion pages; the <em>(reader)</em> feeds embed the full article body
+    extracted via reader mode (comments stripped).</p>
     <ul>
       ${Object.values(FEEDS)
         .map(
