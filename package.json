@@ -7,7 +7,13 @@
     "start": "node --env-file=.env server.js",
     "start:prod": "node server.js"
   },
-  "keywords": ["rss", "hackernews", "lobsters", "offline", "netnewswire"],
+  "keywords": [
+    "rss",
+    "hackernews",
+    "lobsters",
+    "offline",
+    "netnewswire"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",

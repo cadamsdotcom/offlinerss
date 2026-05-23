@@ -3,7 +3,7 @@
 const express = require('express');
 const compression = require('compression');
 const { BoundedCache } = require('./lib/cache');
-const { buildSelfContainedPage } = require('./lib/inline');
+const { renderDiscussion } = require('./lib/render');
 const { FEEDS, fetchSourceItems } = require('./lib/feeds');
 
 const app = express();
@@ -19,10 +19,9 @@ if (!SECRET) {
 const ENTRY_TTL_MS = parseInt(process.env.ENTRY_TTL_MS || String(24 * 60 * 60 * 1000), 10);
 const ENTRY_MAX = parseInt(process.env.ENTRY_MAX || '500', 10);
 const FEED_TTL_MS = parseInt(process.env.FEED_TTL_MS || String(30 * 60 * 1000), 10);
-const FETCH_CONCURRENCY = parseInt(process.env.FETCH_CONCURRENCY || '4', 10);
-const MAX_ASSET_BYTES = parseInt(process.env.MAX_ASSET_BYTES || String(256 * 1024), 10);
+const FETCH_CONCURRENCY = parseInt(process.env.FETCH_CONCURRENCY || '3', 10);
 
-// id -> self-contained HTML of a discussion page. This is the "map from id to
+// id -> rendered HTML of a discussion page. This is the "map from id to
 // content" that avoids re-fetching pages we've already rendered; it is bounded
 // in both age (TTL) and size (LRU eviction) so memory can't grow forever.
 const entryCache = new BoundedCache({ maxEntries: ENTRY_MAX, ttlMs: ENTRY_TTL_MS });
@@ -59,14 +58,11 @@ async function mapWithConcurrency(items, limit, fn) {
   return results;
 }
 
-/** Get a discussion page's self-contained HTML, using the bounded cache. */
-async function getEntryHtml(id, commentsUrl, pageOpts) {
+/** Get a discussion page's rendered HTML, using the bounded cache. */
+async function getEntryHtml(id, commentsUrl, feedKey, story) {
   const cached = entryCache.get(id);
   if (cached) return cached;
-  const html = await buildSelfContainedPage(commentsUrl, {
-    maxAssetBytes: MAX_ASSET_BYTES,
-    ...pageOpts,
-  });
+  const html = await renderDiscussion(commentsUrl, feedKey, story);
   entryCache.set(id, html);
   return html;
 }
@@ -135,8 +131,11 @@ async function buildFeedXml(feed, selfUrl) {
   await mapWithConcurrency(items, FETCH_CONCURRENCY, async (item) => {
     if (!item.commentsUrl) return;
     try {
-      item.contentHtml = await getEntryHtml(item.id, item.commentsUrl, {
-        compactIndent: feed.compactIndent,
+      item.contentHtml = await getEntryHtml(item.id, item.commentsUrl, feed.key, {
+        title: item.title,
+        link: item.link,
+        author: item.author,
+        pubDate: item.pubDate,
       });
     } catch (err) {
       console.error(`Failed to render ${item.id} (${item.commentsUrl}): ${err.message}`);
