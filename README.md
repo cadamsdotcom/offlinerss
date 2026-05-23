@@ -1,17 +1,22 @@
 # offlinerss
 
 Re-exports Hacker News and Lobsters RSS feeds with extra content embedded for
-offline reading in a feed reader like NetNewsWire. Two flavors per source:
+offline reading in a feed reader like NetNewsWire.
 
-| Feed | What it embeds |
-|------|----------------|
-| `/hn.xml` | HN front page — each story's **discussion** rendered as clean, threaded comments |
-| `/lobsters.xml` | Lobsters top stories (past week) — discussion comments |
-| `/hn-reader.xml` | HN front page — each story's **article body** extracted via reader mode (comments/nav/boilerplate stripped) |
-| `/lobsters-reader.xml` | Lobsters top stories — article body via reader mode |
+| Feed | Contents |
+|------|----------|
+| `/hn.xml` | HN front page |
+| `/lobsters.xml` | Lobsters top stories (past week) |
 
-The reader feeds reuse the same source feeds (and story URLs) as their
-discussion counterparts. Article extraction uses
+Each source feed is queried **once**, and every story produces **two items**, in
+the source's original order:
+
+1. **`Article: <title>`** — the full article body extracted via reader mode
+   (comments, nav, and boilerplate stripped).
+2. **`Comments: <title>`** — the HN/Lobsters discussion rendered as clean,
+   threaded comments.
+
+Article extraction uses
 [Mozilla Readability](https://github.com/mozilla/readability) (the engine behind
 Firefox Reader View) over a lightweight [linkedom](https://github.com/WebReflection/linkedom)
 DOM, so only the main article remains.

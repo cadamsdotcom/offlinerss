@@ -74,7 +74,7 @@ async function mapWithConcurrency(items, limit, fn) {
  * the persistent KV store (L2) if configured, and only re-renders on a full
  * miss — populating both layers so later builds and cold starts reuse it.
  */
-async function getEntryHtml(id, targetUrl, feed, story) {
+async function getEntryHtml(id, kind, targetUrl, feedKey, story) {
   const local = entryCache.get(id);
   if (local) return local;
   const remote = await entryStore.get(id);
@@ -83,9 +83,9 @@ async function getEntryHtml(id, targetUrl, feed, story) {
     return remote;
   }
   const html =
-    feed.mode === 'article'
-      ? await renderArticle(targetUrl, feed.key, story)
-      : await renderDiscussion(targetUrl, feed.key, story);
+    kind === 'article'
+      ? await renderArticle(targetUrl, feedKey, story)
+      : await renderDiscussion(targetUrl, feedKey, story);
   entryCache.set(id, html);
   await entryStore.set(id, html);
   return html;
@@ -149,29 +149,60 @@ function buildRss(feed, items, selfUrl) {
 }
 
 async function buildFeedXml(feed, selfUrl) {
-  // Return as many items as the source feed contains.
-  const items = await fetchSourceItems(feed);
+  // Query the source feed once. Each source story becomes two output items, in
+  // original order: the reader-mode article, then its discussion.
+  const sources = await fetchSourceItems(feed);
 
-  await mapWithConcurrency(items, FETCH_CONCURRENCY, async (item) => {
-    // Discussion feeds render the comments page; reader feeds render the
-    // article the story links to.
-    const targetUrl = feed.mode === 'article' ? item.link : item.commentsUrl;
-    if (!targetUrl) return;
+  const items = [];
+  const tasks = [];
+  for (const src of sources) {
     const story = {
-      title: item.title,
-      link: item.link,
-      author: item.author,
-      pubDate: item.pubDate,
-      commentsUrl: item.commentsUrl,
+      title: src.title,
+      link: src.link,
+      author: src.author,
+      pubDate: src.pubDate,
+      commentsUrl: src.commentsUrl,
     };
+
+    const articleItem = {
+      title: `Article: ${src.title}`,
+      link: src.link || src.commentsUrl,
+      guid: `article:${src.id}`,
+      pubDate: src.pubDate,
+      author: src.author,
+      commentsUrl: src.commentsUrl,
+    };
+    const commentsItem = {
+      title: `Comments: ${src.title}`,
+      link: src.commentsUrl,
+      guid: `comments:${src.id}`,
+      pubDate: src.pubDate,
+      author: src.author,
+      commentsUrl: src.commentsUrl,
+      origDescription: src.origDescription,
+    };
+    items.push(articleItem, commentsItem);
+
+    // Self/text posts have no external article; fall back to the discussion
+    // page as the article target (reader mode extracts the post body).
+    const articleTarget = src.link || src.commentsUrl;
+    if (articleTarget) {
+      tasks.push({ item: articleItem, kind: 'article', cacheId: `article:${src.id}`, targetUrl: articleTarget, story });
+    }
+    if (src.commentsUrl) {
+      tasks.push({ item: commentsItem, kind: 'comments', cacheId: `comments:${src.id}`, targetUrl: src.commentsUrl, story });
+    }
+  }
+
+  await mapWithConcurrency(tasks, FETCH_CONCURRENCY, async (t) => {
     try {
-      item.contentHtml = await getEntryHtml(item.id, targetUrl, feed, story);
+      t.item.contentHtml = await getEntryHtml(t.cacheId, t.kind, t.targetUrl, feed.key, t.story);
     } catch (err) {
-      console.error(`Failed to render ${item.id} (${targetUrl}): ${err.message}`);
+      console.error(`Failed to render ${t.kind} ${t.cacheId} (${t.targetUrl}): ${err.message}`);
       // Surface the failure in the entry itself (with links out) instead of
       // silently falling back to a bare description, so it's diagnosable.
       // Not cached: the next build retries and may succeed (e.g. after a 429).
-      item.contentHtml = renderFallback(targetUrl, feed.key, story, err);
+      t.item.contentHtml = renderFallback(t.targetUrl, feed.key, t.story, err);
     }
   });
 
@@ -206,9 +237,10 @@ app.get('/', (req, res) => {
   const s = req.query.secret;
   res.send(`
     <h1>offlinerss</h1>
-    <p>HN and Lobsters feeds for offline reading. The <em>(offline)</em> feeds embed
-    the discussion pages; the <em>(reader)</em> feeds embed the full article body
-    extracted via reader mode (comments stripped).</p>
+    <p>HN and Lobsters feeds for offline reading. Each story appears as two
+    items in the source's order: an <em>Article:</em> item with the full body
+    extracted via reader mode (comments stripped), followed by a
+    <em>Comments:</em> item with the threaded discussion.</p>
     <ul>
       ${Object.values(FEEDS)
         .map(
