@@ -1,0 +1,28 @@
+services:
+  offlinerss:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    network_mode: service:tailscale
+    depends_on:
+      - tailscale
+
+  tailscale:
+    image: tailscale/tailscale:latest
+    hostname: offlinerss
+    restart: unless-stopped
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY}
+      - TS_HOSTNAME=offlinerss
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_SERVE_CONFIG=/config/serve.json
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - ./tailscale:/config:ro
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+
+volumes:
+  tailscale-state:

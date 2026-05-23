@@ -1,0 +1,18 @@
+{
+  "name": "offlinerss",
+  "version": "1.0.0",
+  "description": "Re-export HN and Lobsters RSS feeds with discussion pages embedded for offline reading",
+  "main": "server.js",
+  "scripts": {
+    "start": "node --env-file=.env server.js",
+    "start:prod": "node server.js"
+  },
+  "keywords": ["rss", "hackernews", "lobsters", "offline", "netnewswire"],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "express": "^5.2.1"
+  }
+}
