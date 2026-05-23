@@ -3,6 +3,7 @@
 const express = require('express');
 const compression = require('compression');
 const { BoundedCache } = require('./lib/cache');
+const { createKvStore } = require('./lib/kvstore');
 const { renderDiscussion, renderFallback } = require('./lib/render');
 const { FEEDS, fetchSourceItems } = require('./lib/feeds');
 
@@ -25,6 +26,10 @@ const FETCH_CONCURRENCY = parseInt(process.env.FETCH_CONCURRENCY || '3', 10);
 // content" that avoids re-fetching pages we've already rendered; it is bounded
 // in both age (TTL) and size (LRU eviction) so memory can't grow forever.
 const entryCache = new BoundedCache({ maxEntries: ENTRY_MAX, ttlMs: ENTRY_TTL_MS });
+
+// Optional L2 cache that survives serverless cold starts (see lib/kvstore.js).
+// Disabled automatically when its env vars are absent.
+const entryStore = createKvStore({ keyPrefix: 'offlinerss:entry:', ttlMs: ENTRY_TTL_MS });
 
 // feedKey -> { xml, builtAt }. Short-lived so we don't re-fetch/re-parse the
 // source feed on every request, while still refreshing periodically.
@@ -58,12 +63,22 @@ async function mapWithConcurrency(items, limit, fn) {
   return results;
 }
 
-/** Get a discussion page's rendered HTML, using the bounded cache. */
+/**
+ * Get a discussion page's rendered HTML. Checks the in-memory cache (L1), then
+ * the persistent KV store (L2) if configured, and only re-renders on a full
+ * miss — populating both layers so later builds and cold starts reuse it.
+ */
 async function getEntryHtml(id, commentsUrl, feedKey, story) {
-  const cached = entryCache.get(id);
-  if (cached) return cached;
+  const local = entryCache.get(id);
+  if (local) return local;
+  const remote = await entryStore.get(id);
+  if (remote) {
+    entryCache.set(id, remote);
+    return remote;
+  }
   const html = await renderDiscussion(commentsUrl, feedKey, story);
   entryCache.set(id, html);
+  await entryStore.set(id, html);
   return html;
 }
 
@@ -190,7 +205,14 @@ app.get('/', (req, res) => {
   `);
 });
 
-app.listen(PORT, () => {
-  console.log(`offlinerss running at http://localhost:${PORT}`);
-  console.log(`Feeds: ${Object.keys(FEEDS).map((k) => `/${k}.xml`).join(', ')}`);
-});
+// Start a listener only when run directly (Docker / local). On serverless hosts
+// the platform imports the exported app and invokes it per request instead.
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`offlinerss running at http://localhost:${PORT}`);
+    console.log(`Feeds: ${Object.keys(FEEDS).map((k) => `/${k}.xml`).join(', ')}`);
+    console.log(`Entry cache: in-memory${entryStore.enabled ? ' + KV (persistent)' : ''}`);
+  });
+}
+
+module.exports = app;
