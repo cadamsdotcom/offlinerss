@@ -109,6 +109,13 @@ function rfc822(dateStr) {
   return (isNaN(d.getTime()) ? new Date() : d).toUTCString();
 }
 
+// Return an RFC-822 date `ms` milliseconds before the given date string, or the
+// original value when it isn't a parseable date.
+function olderBy(dateStr, ms) {
+  const t = Date.parse(dateStr || '');
+  return isNaN(t) ? dateStr : new Date(t - ms).toUTCString();
+}
+
 function buildRss(feed, items, selfUrl) {
   const parts = [];
   parts.push('<?xml version="1.0" encoding="UTF-8"?>');
@@ -176,7 +183,11 @@ async function buildFeedXml(feed, selfUrl) {
       title: `Comments: ${src.title}`,
       link: src.commentsUrl,
       guid: `comments:${src.id}`,
-      pubDate: src.pubDate,
+      // Same story time as the article, minus one second. Readers sort the
+      // timeline by date (newest first) and break ties internally, which made
+      // the pair flip. Nudging Comments 1s older keeps it directly below its
+      // Article (which keeps the real pubDate) without distorting the time.
+      pubDate: olderBy(src.pubDate, 1000),
       author: src.author,
       commentsUrl: src.commentsUrl,
       origDescription: src.origDescription,
