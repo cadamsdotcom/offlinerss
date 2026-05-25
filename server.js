@@ -234,8 +234,27 @@ app.get('/:feed.xml', async (req, res) => {
   }
 });
 
-app.get('/', (req, res) => {
+// Report whether the persistent KV cache is not just configured but actually
+// reachable, by doing a real set/get round-trip. Surfaced on the home page so
+// the KV status is checkable at runtime (the startup log only runs in local
+// dev, never on serverless).
+async function kvStatus() {
+  if (!entryStore.enabled) return 'disabled — no KV env vars detected (in-memory cache only)';
+  try {
+    const token = `ping-${Date.now()}`;
+    await entryStore.set('__healthcheck', token);
+    const got = await entryStore.get('__healthcheck');
+    return got === token
+      ? 'enabled and reachable (set/get round-trip OK)'
+      : 'configured, but the set/get round-trip failed (check the KV URL/token)';
+  } catch (err) {
+    return `configured, but unreachable: ${err.message}`;
+  }
+}
+
+app.get('/', async (req, res) => {
   const s = req.query.secret;
+  const kv = await kvStatus();
   res.send(`
     <h1>offlinerss</h1>
     <p>HN and Lobsters feeds for offline reading. Each story appears as two
@@ -250,6 +269,7 @@ app.get('/', (req, res) => {
         )
         .join('')}
     </ul>
+    <p><strong>Persistent cache (KV):</strong> ${escapeXml(kv)}</p>
   `);
 });
 
