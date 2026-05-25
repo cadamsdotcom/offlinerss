@@ -19,7 +19,6 @@ if (!SECRET) {
 // Tunables (all optional, with sensible defaults).
 const ENTRY_TTL_MS = parseInt(process.env.ENTRY_TTL_MS || String(24 * 60 * 60 * 1000), 10);
 const ENTRY_MAX = parseInt(process.env.ENTRY_MAX || '500', 10);
-const FEED_TTL_MS = parseInt(process.env.FEED_TTL_MS || String(30 * 60 * 1000), 10);
 const FETCH_CONCURRENCY = parseInt(process.env.FETCH_CONCURRENCY || '3', 10);
 
 // id -> rendered HTML of a discussion page. This is the "map from id to
@@ -37,9 +36,10 @@ const entryStore = createKvStore({
   ttlMs: ENTRY_TTL_MS,
 });
 
-// feedKey -> { xml, builtAt }. Short-lived so we don't re-fetch/re-parse the
-// source feed on every request, while still refreshing periodically.
-const feedCache = new Map();
+// Each feed is reassembled from a fresh source fetch on every request, so the
+// story list always reflects the current front page (nothing falls through a
+// stale-feed window). This stays cheap because per-story rendered content is
+// cached above — a rebuild only fetches/renders stories it hasn't seen yet.
 
 // Each item repeats the same stylesheets, so the assembled feed is large but
 // highly compressible; gzip cuts the wire transfer ~7x.
@@ -220,23 +220,13 @@ async function buildFeedXml(feed, selfUrl) {
   return buildRss(feed, items, selfUrl);
 }
 
-async function getFeedXml(feed, selfUrl) {
-  const cached = feedCache.get(feed.key);
-  if (cached && Date.now() - cached.builtAt < FEED_TTL_MS) {
-    return cached.xml;
-  }
-  const xml = await buildFeedXml(feed, selfUrl);
-  feedCache.set(feed.key, { xml, builtAt: Date.now() });
-  return xml;
-}
-
 // Feed routes: /hn.xml and /lobsters.xml
 app.get('/:feed.xml', async (req, res) => {
   const feed = FEEDS[req.params.feed];
   if (!feed) return res.status(404).type('text/plain').send('Unknown feed');
   try {
     const selfUrl = `${req.protocol}://${req.get('host')}/${feed.key}.xml`;
-    const xml = await getFeedXml(feed, selfUrl);
+    const xml = await buildFeedXml(feed, selfUrl);
     res.type('application/rss+xml').send(xml);
   } catch (err) {
     console.error(`Error building ${feed.key} feed:`, err);

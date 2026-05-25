@@ -53,9 +53,8 @@ see `.env.example`).
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `API_SECRET` | _(required)_ | Shared secret for `?secret=` |
-| `ENTRY_TTL_MS` | `86400000` (24h) | How long a rendered entry stays cached |
+| `ENTRY_TTL_MS` | `86400000` (24h) | How long a rendered entry's content stays cached |
 | `ENTRY_MAX` | `500` | Max cached entries before LRU eviction |
-| `FEED_TTL_MS` | `1800000` (30m) | How long an assembled feed is reused |
 | `FETCH_CONCURRENCY` | `3` | Parallel page fetches per feed build |
 | `JINA_READER` | _(on)_ | Set `0`/`false`/`off`/`no` to disable the Jina fallback |
 | `JINA_API_KEY` | _(none)_ | Optional; raises Jina's rate limit |
