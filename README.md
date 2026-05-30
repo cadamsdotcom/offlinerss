@@ -54,6 +54,7 @@ see `.env.example`).
 |-----|---------|---------|
 | `API_SECRET` | _(required)_ | Shared secret for `?secret=` |
 | `ENTRY_TTL_MS` | `86400000` (24h) | How long a rendered entry's content stays cached |
+| `FAIL_TTL_MS` | `600000` (10m) | How long a failed render is remembered (and skipped) before being retried |
 | `ENTRY_MAX` | `500` | Max cached entries before LRU eviction |
 | `FETCH_CONCURRENCY` | `3` | Parallel page fetches per feed build |
 | `JINA_READER` | _(on)_ | Set `0`/`false`/`off`/`no` to disable the Jina fallback |

@@ -36,6 +36,20 @@ const entryStore = createKvStore({
   ttlMs: ENTRY_TTL_MS,
 });
 
+// Negative cache. When an entry can't be rendered (every article fallback
+// missed, a fetch timed out, etc.) we remember that briefly so we don't
+// re-attempt it — and re-spend its whole fetch budget — on every single build.
+// Without this, one persistently failing page is retried on each refresh and
+// can keep timing the function out indefinitely even when the rest is cached.
+// The TTL is short so an entry recovers on its own once the upstream issue
+// clears (e.g. a transient 429). Mirrors the entry cache's L1 + L2 layering.
+const FAIL_TTL_MS = parseInt(process.env.FAIL_TTL_MS || String(10 * 60 * 1000), 10);
+const failCache = new BoundedCache({ maxEntries: ENTRY_MAX, ttlMs: FAIL_TTL_MS });
+const failStore = createKvStore({
+  keyPrefix: `offlinerss:${RENDER_VERSION}:fail:`,
+  ttlMs: FAIL_TTL_MS,
+});
+
 // Each feed is reassembled from a fresh source fetch on every request, so the
 // story list always reflects the current front page (nothing falls through a
 // stale-feed window). This stays cheap because per-story rendered content is
@@ -82,13 +96,34 @@ async function getEntryHtml(id, kind, targetUrl, feedKey, story) {
     entryCache.set(id, remote);
     return remote;
   }
-  const html =
-    kind === 'article'
-      ? await renderArticle(targetUrl, feedKey, story)
-      : await renderDiscussion(targetUrl, feedKey, story);
-  entryCache.set(id, html);
-  await entryStore.set(id, html);
-  return html;
+  // If we recently failed to render this entry, don't retry it on this build:
+  // re-throw the remembered error so the caller renders the link-out fallback
+  // without re-spending the fetch budget. Checked only on a positive-cache
+  // miss, so the warm/success path pays no extra lookups.
+  const failedLocal = failCache.get(id);
+  if (failedLocal) throw new Error(failedLocal);
+  const failedRemote = await failStore.get(id);
+  if (failedRemote) {
+    failCache.set(id, failedRemote);
+    throw new Error(failedRemote);
+  }
+  try {
+    const html =
+      kind === 'article'
+        ? await renderArticle(targetUrl, feedKey, story)
+        : await renderDiscussion(targetUrl, feedKey, story);
+    entryCache.set(id, html);
+    await entryStore.set(id, html);
+    return html;
+  } catch (err) {
+    // Remember the failure (short TTL) before re-throwing, so the next build
+    // serves the fallback immediately instead of attempting the same slow
+    // render again. The caller turns this into a link-out fallback entry.
+    const msg = err.message || String(err);
+    failCache.set(id, msg);
+    await failStore.set(id, msg);
+    throw err;
+  }
 }
 
 function escapeXml(str) {
@@ -211,8 +246,9 @@ async function buildFeedXml(feed, selfUrl) {
     } catch (err) {
       console.error(`Failed to render ${t.kind} ${t.cacheId} (${t.targetUrl}): ${err.message}`);
       // Surface the failure in the entry itself (with links out) instead of
-      // silently falling back to a bare description, so it's diagnosable.
-      // Not cached: the next build retries and may succeed (e.g. after a 429).
+      // silently falling back to a bare description, so it's diagnosable. The
+      // failure is negative-cached (short TTL) in getEntryHtml, so the next few
+      // builds serve this fallback cheaply instead of re-attempting the render.
       t.item.contentHtml = renderFallback(t.targetUrl, feed.key, t.story, err);
     }
   });
