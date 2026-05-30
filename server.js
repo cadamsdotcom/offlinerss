@@ -88,11 +88,15 @@ async function mapWithConcurrency(items, limit, fn) {
  * the persistent KV store (L2) if configured, and only re-renders on a full
  * miss — populating both layers so later builds and cold starts reuse it.
  */
-async function getEntryHtml(id, kind, targetUrl, feedKey, story) {
+async function getEntryHtml(id, kind, targetUrl, feedKey, story, stats) {
   const local = entryCache.get(id);
-  if (local) return local;
+  if (local) {
+    if (stats) stats.l1++;
+    return local;
+  }
   const remote = await entryStore.get(id);
   if (remote) {
+    if (stats) stats.l2++;
     entryCache.set(id, remote);
     return remote;
   }
@@ -101,17 +105,30 @@ async function getEntryHtml(id, kind, targetUrl, feedKey, story) {
   // without re-spending the fetch budget. Checked only on a positive-cache
   // miss, so the warm/success path pays no extra lookups.
   const failedLocal = failCache.get(id);
-  if (failedLocal) throw new Error(failedLocal);
+  if (failedLocal) {
+    if (stats) stats.skipped++;
+    throw new Error(failedLocal);
+  }
   const failedRemote = await failStore.get(id);
   if (failedRemote) {
+    if (stats) stats.skipped++;
     failCache.set(id, failedRemote);
     throw new Error(failedRemote);
   }
+  // Cold render. Log the start so an entry that's still in flight when the
+  // function is killed (FUNCTION_INVOCATION_TIMEOUT) is identifiable: it leaves
+  // a "start" line with no matching completion. The render functions log their
+  // own fetch/parse/tier timing on completion; here we just time the whole
+  // entry and report failures (with elapsed ms).
+  const t0 = Date.now();
+  console.log(`[entry] start ${id} ${targetUrl}`);
   try {
     const html =
       kind === 'article'
         ? await renderArticle(targetUrl, feedKey, story)
         : await renderDiscussion(targetUrl, feedKey, story);
+    if (stats) stats.rendered++;
+    console.log(`[entry] ok ${id} ${Date.now() - t0}ms ${html.length}b`);
     entryCache.set(id, html);
     await entryStore.set(id, html);
     return html;
@@ -120,6 +137,8 @@ async function getEntryHtml(id, kind, targetUrl, feedKey, story) {
     // serves the fallback immediately instead of attempting the same slow
     // render again. The caller turns this into a link-out fallback entry.
     const msg = err.message || String(err);
+    if (stats) stats.failed++;
+    console.warn(`[entry] FAIL ${id} ${Date.now() - t0}ms: ${msg}`);
     failCache.set(id, msg);
     await failStore.set(id, msg);
     throw err;
@@ -191,9 +210,12 @@ function buildRss(feed, items, selfUrl) {
 }
 
 async function buildFeedXml(feed, selfUrl) {
+  const buildStart = Date.now();
   // Query the source feed once. Each source story becomes two output items, in
   // original order: the reader-mode article, then its discussion.
+  const srcStart = Date.now();
   const sources = await fetchSourceItems(feed);
+  console.log(`[build] ${feed.key} source: ${sources.length} stories in ${Date.now() - srcStart}ms`);
 
   const items = [];
   const tasks = [];
@@ -240,18 +262,29 @@ async function buildFeedXml(feed, selfUrl) {
     }
   }
 
+  // Per-build tally of how each entry resolved (cache hits vs. fresh renders vs.
+  // failures), summarized at the end. getEntryHtml does the per-entry logging.
+  const stats = { l1: 0, l2: 0, rendered: 0, failed: 0, skipped: 0 };
   await mapWithConcurrency(tasks, FETCH_CONCURRENCY, async (t) => {
     try {
-      t.item.contentHtml = await getEntryHtml(t.cacheId, t.kind, t.targetUrl, feed.key, t.story);
+      t.item.contentHtml = await getEntryHtml(t.cacheId, t.kind, t.targetUrl, feed.key, t.story, stats);
     } catch (err) {
-      console.error(`Failed to render ${t.kind} ${t.cacheId} (${t.targetUrl}): ${err.message}`);
       // Surface the failure in the entry itself (with links out) instead of
       // silently falling back to a bare description, so it's diagnosable. The
       // failure is negative-cached (short TTL) in getEntryHtml, so the next few
       // builds serve this fallback cheaply instead of re-attempting the render.
+      // getEntryHtml already logged the failure/skip; no need to log again here.
       t.item.contentHtml = renderFallback(t.targetUrl, feed.key, t.story, err);
     }
   });
+
+  // Final tally. If the function times out, this line never prints — the
+  // unmatched `[entry] start` line(s) above pinpoint what was still in flight.
+  console.log(
+    `[build] ${feed.key} done in ${Date.now() - buildStart}ms — ${tasks.length} entries ` +
+      `(L1 ${stats.l1}, L2 ${stats.l2}, rendered ${stats.rendered}, ` +
+      `failed ${stats.failed}, neg-skipped ${stats.skipped})`
+  );
 
   return buildRss(feed, items, selfUrl);
 }
