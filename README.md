@@ -1,7 +1,13 @@
 # offlinerss
 
 Re-exports Hacker News and Lobsters RSS feeds with extra content embedded for
-offline reading in a feed reader like NetNewsWire.
+offline reading in a feed reader.
+
+It's designed and tested primarily for [NetNewsWire](https://netnewswire.com/):
+the embedded content is styled with inline CSS (NetNewsWire strips `<style>`
+blocks but keeps inline styles) and comment threads use native `<details>` for
+collapsing. Other readers should work, but may render the embedded content
+differently.
 
 | Feed | Contents |
 |------|----------|
@@ -29,6 +35,13 @@ Every request requires a shared secret as a query param:
 ```
 https://your-host/hn.xml?secret=YOUR_SECRET
 ```
+
+The secret is passed as a URL query parameter rather than an `Authorization`
+header or HTTP Basic auth because many RSS readers don't let you attach custom
+headers (or credentials) to a feed subscription — a query param is the lowest
+common denominator that works in every reader. The usual trade-off applies:
+query-string secrets can surface in server/proxy access logs, so treat the feed
+URL itself as sensitive.
 
 `/health` is exempt so uptime monitors can probe it.
 
@@ -95,5 +108,28 @@ API_SECRET=dev npm start          # or: npm run start (reads .env)
 
 Then open `http://localhost:3000/?secret=dev` for the feed index.
 
-Deploys to Vercel as-is (`api/index.js` is the serverless entrypoint; routes are
-funneled there by `vercel.json`).
+## Deploying (Vercel)
+
+The app runs as a zero-config Vercel serverless function — no build step or
+framework settings needed. `vercel.json` routes every request to `api/index.js`
+(which exports the Express app) and sets the function timeout.
+
+1. **Import the repo.** In Vercel, *Add New → Project* and import this Git
+   repository. Leave the build/output settings at their defaults.
+2. **Set `API_SECRET`.** Under *Settings → Environment Variables*, add
+   `API_SECRET` with a long random value. It's the only required variable; see
+   [Configuration](#configuration) for the optional tunables.
+3. **(Recommended) Add a KV store.** Under *Storage*, create or connect an
+   Upstash Redis store (via Vercel's Marketplace) and attach it to the project.
+   Vercel injects the credentials automatically — the code reads either Vercel
+   KV's `KV_REST_API_URL` / `KV_REST_API_TOKEN` or Upstash's
+   `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`, so no code changes are
+   needed. Without it the cache is in-memory only, which on serverless is wiped
+   on every cold start — so each build re-fetches every page from one IP and is
+   far more likely to be rate-limited. See [Caching & freshness](#caching--freshness).
+4. **Deploy** — or redeploy after adding the env var / KV store so they take
+   effect.
+
+Your feeds are then at `https://<your-deployment>/hn.xml?secret=YOUR_SECRET` (and
+`/lobsters.xml?secret=…`); open `https://<your-deployment>/?secret=…` for the
+index, then subscribe to the feed URLs in your reader.
