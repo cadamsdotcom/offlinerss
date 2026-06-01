@@ -92,6 +92,17 @@ async function mapWithConcurrency(items, limit, fn) {
   return results;
 }
 
+// Spread a ttl by ±25% (uniform). Entries are rendered together in one build,
+// so without this they'd share an identical expiry and all go stale on the
+// same tick — the next build would then re-render the whole batch at once,
+// bursting requests at one upstream (notably news.ycombinator.com, which
+// rate-limits datacenter IPs). Jitter scatters the expiries so re-renders
+// trickle across builds instead. Re-rendered entries draw a fresh jitter, so
+// the batch stays desynchronized over time rather than re-clumping.
+function jitterTtl(ttlMs) {
+  return Math.round(ttlMs * (0.75 + Math.random() * 0.5));
+}
+
 /**
  * Get a discussion page's rendered HTML. Checks the in-memory cache (L1), then
  * the persistent KV store (L2) if configured, and only re-renders on a full
@@ -100,8 +111,10 @@ async function mapWithConcurrency(items, limit, fn) {
 async function getEntryHtml(id, kind, targetUrl, feedKey, story, stats) {
   // Comments are append-only and grow while a story is active, so they expire
   // quickly to be re-rendered; articles are immutable and kept for the long
-  // default. This ttl rides along on every positive-cache write below.
-  const ttl = kind === 'comments' ? COMMENTS_TTL_MS : ARTICLE_TTL_MS;
+  // default. Jittered so a batch rendered together doesn't expire in lockstep.
+  // Computed once here and reused for every positive-cache write below, so an
+  // entry's L1 and L2 copies share the same expiry.
+  const ttl = jitterTtl(kind === 'comments' ? COMMENTS_TTL_MS : ARTICLE_TTL_MS);
   const local = entryCache.get(id);
   if (local) {
     if (stats) stats.l1++;
