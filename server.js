@@ -21,10 +21,19 @@ const ENTRY_TTL_MS = parseInt(process.env.ENTRY_TTL_MS || String(24 * 60 * 60 * 
 const ENTRY_MAX = parseInt(process.env.ENTRY_MAX || '500', 10);
 const FETCH_CONCURRENCY = parseInt(process.env.FETCH_CONCURRENCY || '3', 10);
 
+// Per-kind entry lifetimes. Articles are immutable once published, so they get
+// the long default; discussions are append-only and grow while a story is hot,
+// so comments get a much shorter TTL to re-render and pick up new replies.
+// ENTRY_TTL_MS remains the article default for backward compatibility.
+const ARTICLE_TTL_MS = parseInt(process.env.ARTICLE_TTL_MS || String(ENTRY_TTL_MS), 10);
+const COMMENTS_TTL_MS = parseInt(process.env.COMMENTS_TTL_MS || String(30 * 60 * 1000), 10);
+
 // id -> rendered HTML of a discussion page. This is the "map from id to
 // content" that avoids re-fetching pages we've already rendered; it is bounded
-// in both age (TTL) and size (LRU eviction) so memory can't grow forever.
-const entryCache = new BoundedCache({ maxEntries: ENTRY_MAX, ttlMs: ENTRY_TTL_MS });
+// in both age (TTL) and size (LRU eviction) so memory can't grow forever. The
+// default ttl is the longer (article) one; comments entries pass their own
+// shorter ttl per set() below.
+const entryCache = new BoundedCache({ maxEntries: ENTRY_MAX, ttlMs: ARTICLE_TTL_MS });
 
 // Optional L2 cache that survives serverless cold starts (see lib/kvstore.js).
 // Disabled automatically when its env vars are absent. The deploy's git commit
@@ -33,7 +42,7 @@ const entryCache = new BoundedCache({ maxEntries: ENTRY_MAX, ttlMs: ENTRY_TTL_MS
 const RENDER_VERSION = (process.env.VERCEL_GIT_COMMIT_SHA || 'dev').slice(0, 7);
 const entryStore = createKvStore({
   keyPrefix: `offlinerss:${RENDER_VERSION}:entry:`,
-  ttlMs: ENTRY_TTL_MS,
+  ttlMs: ARTICLE_TTL_MS,
 });
 
 // Negative cache. When an entry can't be rendered (every article fallback
@@ -89,6 +98,10 @@ async function mapWithConcurrency(items, limit, fn) {
  * miss — populating both layers so later builds and cold starts reuse it.
  */
 async function getEntryHtml(id, kind, targetUrl, feedKey, story, stats) {
+  // Comments are append-only and grow while a story is active, so they expire
+  // quickly to be re-rendered; articles are immutable and kept for the long
+  // default. This ttl rides along on every positive-cache write below.
+  const ttl = kind === 'comments' ? COMMENTS_TTL_MS : ARTICLE_TTL_MS;
   const local = entryCache.get(id);
   if (local) {
     if (stats) stats.l1++;
@@ -97,7 +110,7 @@ async function getEntryHtml(id, kind, targetUrl, feedKey, story, stats) {
   const remote = await entryStore.get(id);
   if (remote) {
     if (stats) stats.l2++;
-    entryCache.set(id, remote);
+    entryCache.set(id, remote, ttl);
     return remote;
   }
   // If we recently failed to render this entry, don't retry it on this build:
@@ -129,8 +142,8 @@ async function getEntryHtml(id, kind, targetUrl, feedKey, story, stats) {
         : await renderDiscussion(targetUrl, feedKey, story);
     if (stats) stats.rendered++;
     console.log(`[entry] ok ${id} ${Date.now() - t0}ms ${html.length}b`);
-    entryCache.set(id, html);
-    await entryStore.set(id, html);
+    entryCache.set(id, html, ttl);
+    await entryStore.set(id, html, ttl);
     return html;
   } catch (err) {
     // Remember the failure (short TTL) before re-throwing, so the next build

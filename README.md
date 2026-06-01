@@ -53,7 +53,9 @@ see `.env.example`).
 | Var | Default | Purpose |
 |-----|---------|---------|
 | `API_SECRET` | _(required)_ | Shared secret for `?secret=` |
-| `ENTRY_TTL_MS` | `86400000` (24h) | How long a rendered entry's content stays cached |
+| `ENTRY_TTL_MS` | `86400000` (24h) | Default cached lifetime; also the fallback for `ARTICLE_TTL_MS` |
+| `ARTICLE_TTL_MS` | _(= `ENTRY_TTL_MS`)_ | How long a rendered **article** stays cached (immutable, so long) |
+| `COMMENTS_TTL_MS` | `1800000` (30m) | How long a rendered **discussion** stays cached before re-rendering to pick up new comments |
 | `FAIL_TTL_MS` | `600000` (10m) | How long a failed render is remembered (and skipped) before being retried |
 | `ENTRY_MAX` | `500` | Max cached entries before LRU eviction |
 | `FETCH_CONCURRENCY` | `3` | Parallel page fetches per feed build |
