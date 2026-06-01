@@ -59,6 +59,22 @@ const failStore = createKvStore({
   ttlMs: FAIL_TTL_MS,
 });
 
+// Stale-on-error cache. Holds the last successfully rendered HTML for each
+// entry far longer than its freshness TTL, so when a re-render fails (e.g. an
+// HN 429 on a comments refresh, after the short comments TTL has already
+// evicted the fresh copy) we can serve the previous render instead of the
+// link-out fallback. Refreshed on every successful render, so it only ages
+// while renders keep failing. A slightly stale comment thread — or a day-old
+// copy of an immutable article — beats a "couldn't load" card. Read only on
+// the failure paths below, so the warm/success path never touches it. Mirrors
+// the entry cache's L1 + L2 layering.
+const STALE_TTL_MS = parseInt(process.env.STALE_TTL_MS || String(24 * 60 * 60 * 1000), 10);
+const lastGoodCache = new BoundedCache({ maxEntries: ENTRY_MAX, ttlMs: STALE_TTL_MS });
+const lastGoodStore = createKvStore({
+  keyPrefix: `offlinerss:${RENDER_VERSION}:good:`,
+  ttlMs: STALE_TTL_MS,
+});
+
 // Each feed is reassembled from a fresh source fetch on every request, so the
 // story list always reflects the current front page (nothing falls through a
 // stale-feed window). This stays cheap because per-story rendered content is
@@ -93,9 +109,27 @@ async function mapWithConcurrency(items, limit, fn) {
 }
 
 /**
+ * Last successfully rendered HTML for an entry (the stale-on-error fallback),
+ * checked L1 then L2 and promoting an L2 hit into L1. Undefined when there's no
+ * prior good render to fall back to.
+ */
+async function getLastGood(id) {
+  const local = lastGoodCache.get(id);
+  if (local) return local;
+  const remote = await lastGoodStore.get(id);
+  if (remote) {
+    lastGoodCache.set(id, remote);
+    return remote;
+  }
+  return undefined;
+}
+
+/**
  * Get a discussion page's rendered HTML. Checks the in-memory cache (L1), then
  * the persistent KV store (L2) if configured, and only re-renders on a full
- * miss — populating both layers so later builds and cold starts reuse it.
+ * miss — populating both layers so later builds and cold starts reuse it. When
+ * a re-render fails, falls back to the last good render (stale-on-error) before
+ * giving up and letting the caller show the link-out fallback.
  */
 async function getEntryHtml(id, kind, targetUrl, feedKey, story, stats) {
   // Comments are append-only and grow while a story is active, so they expire
@@ -115,18 +149,29 @@ async function getEntryHtml(id, kind, targetUrl, feedKey, story, stats) {
     return remote;
   }
   // If we recently failed to render this entry, don't retry it on this build:
-  // re-throw the remembered error so the caller renders the link-out fallback
-  // without re-spending the fetch budget. Checked only on a positive-cache
-  // miss, so the warm/success path pays no extra lookups.
+  // serve the last good render if we have one, else re-throw the remembered
+  // error so the caller shows the link-out fallback — either way without
+  // re-spending the fetch budget. Checked only on a positive-cache miss, so the
+  // warm/success path pays no extra lookups.
   const failedLocal = failCache.get(id);
   if (failedLocal) {
     if (stats) stats.skipped++;
+    const stale = await getLastGood(id);
+    if (stale) {
+      if (stats) stats.stale++;
+      return stale;
+    }
     throw new Error(failedLocal);
   }
   const failedRemote = await failStore.get(id);
   if (failedRemote) {
     if (stats) stats.skipped++;
     failCache.set(id, failedRemote);
+    const stale = await getLastGood(id);
+    if (stale) {
+      if (stats) stats.stale++;
+      return stale;
+    }
     throw new Error(failedRemote);
   }
   // Cold render. Log the start so an entry that's still in flight when the
@@ -145,16 +190,28 @@ async function getEntryHtml(id, kind, targetUrl, feedKey, story, stats) {
     console.log(`[entry] ok ${id} ${Date.now() - t0}ms ${html.length}b`);
     entryCache.set(id, html, ttl);
     await entryStore.set(id, html, ttl);
+    // Refresh the stale-on-error copy (long TTL) so it only ages while renders
+    // are failing.
+    lastGoodCache.set(id, html);
+    await lastGoodStore.set(id, html);
     return html;
   } catch (err) {
-    // Remember the failure (short TTL) before re-throwing, so the next build
-    // serves the fallback immediately instead of attempting the same slow
-    // render again. The caller turns this into a link-out fallback entry.
+    // Remember the failure (short TTL) so the next build doesn't re-attempt the
+    // same slow render. Then, rather than failing outright, serve the last good
+    // render if we have one (stale-on-error) — better a slightly old thread than
+    // a "couldn't load" card. Only with no prior render do we re-throw, letting
+    // the caller show the link-out fallback.
     const msg = err.message || String(err);
     if (stats) stats.failed++;
     console.warn(`[entry] FAIL ${id} ${Date.now() - t0}ms: ${msg}`);
     failCache.set(id, msg);
     await failStore.set(id, msg);
+    const stale = await getLastGood(id);
+    if (stale) {
+      if (stats) stats.stale++;
+      console.warn(`[entry] stale-served ${id} (render failed; using last good render)`);
+      return stale;
+    }
     throw err;
   }
 }
@@ -278,7 +335,7 @@ async function buildFeedXml(feed, selfUrl) {
 
   // Per-build tally of how each entry resolved (cache hits vs. fresh renders vs.
   // failures), summarized at the end. getEntryHtml does the per-entry logging.
-  const stats = { l1: 0, l2: 0, rendered: 0, failed: 0, skipped: 0 };
+  const stats = { l1: 0, l2: 0, rendered: 0, failed: 0, skipped: 0, stale: 0 };
   await mapWithConcurrency(tasks, FETCH_CONCURRENCY, async (t) => {
     try {
       t.item.contentHtml = await getEntryHtml(t.cacheId, t.kind, t.targetUrl, feed.key, t.story, stats);
@@ -297,7 +354,7 @@ async function buildFeedXml(feed, selfUrl) {
   console.log(
     `[build] ${feed.key} done in ${Date.now() - buildStart}ms — ${tasks.length} entries ` +
       `(L1 ${stats.l1}, L2 ${stats.l2}, rendered ${stats.rendered}, ` +
-      `failed ${stats.failed}, neg-skipped ${stats.skipped})`
+      `failed ${stats.failed}, neg-skipped ${stats.skipped}, stale-served ${stats.stale})`
   );
 
   return buildRss(feed, items, selfUrl);

@@ -42,8 +42,12 @@ in order:
    opt out. Sends the article URL to Jina's servers.
 2. **archive.today** — best-effort snapshot fetch (often blocked from
    datacenter IPs, so mostly a last resort).
-3. **Link-out** — if all else fails, the entry shows links to the article, an
-   archive.today snapshot, and the discussion.
+3. **Stale-on-error** — if extraction fails on a *re-render* (e.g. an HN 429 on
+   a comments refresh) and we have a previous successful render, the entry keeps
+   serving that last good copy rather than degrading. Kept for `STALE_TTL_MS`.
+4. **Link-out** — if all else fails and there's no prior render to fall back to,
+   the entry shows links to the article, an archive.today snapshot, and the
+   discussion.
 
 ## Configuration
 
@@ -57,6 +61,7 @@ see `.env.example`).
 | `ARTICLE_TTL_MS` | _(= `ENTRY_TTL_MS`)_ | How long a rendered **article** stays cached (immutable, so long) |
 | `COMMENTS_TTL_MS` | `1800000` (30m) | How long a rendered **discussion** stays cached before re-rendering to pick up new comments |
 | `FAIL_TTL_MS` | `600000` (10m) | How long a failed render is remembered (and skipped) before being retried |
+| `STALE_TTL_MS` | `86400000` (24h) | How long the last good render is kept to serve on a failed re-render (stale-on-error) before falling back to link-out |
 | `ENTRY_MAX` | `500` | Max cached entries before LRU eviction |
 | `FETCH_CONCURRENCY` | `3` | Parallel page fetches per feed build |
 | `JINA_READER` | _(on)_ | Set `0`/`false`/`off`/`no` to disable the Jina fallback |
