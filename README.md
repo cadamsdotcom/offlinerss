@@ -8,8 +8,9 @@ offline reading in a feed reader like NetNewsWire.
 | `/hn.xml` | HN front page |
 | `/lobsters.xml` | Lobsters top stories (past week) |
 
-Each source feed is queried **once**, and every story produces **two items**, in
-the source's original order:
+Each source feed is queried **once per request** (the feed is rebuilt fresh
+every time — see [Caching & freshness](#caching--freshness)), and every story
+produces **two items**, in the source's original order:
 
 1. **`Article: <title>`** — the full article body extracted via reader mode
    (comments, nav, and boilerplate stripped).
@@ -26,7 +27,7 @@ DOM, so only the main article remains.
 Every request requires a shared secret as a query param:
 
 ```
-https://your-host/hn-reader.xml?secret=YOUR_SECRET
+https://your-host/hn.xml?secret=YOUR_SECRET
 ```
 
 `/health` is exempt so uptime monitors can probe it.
@@ -34,7 +35,7 @@ https://your-host/hn-reader.xml?secret=YOUR_SECRET
 ## Bot walls & captchas
 
 Some article pages sit behind a proof-of-work / captcha interstitial (Anubis,
-Cloudflare "Just a moment", etc.). The reader feeds detect these and fall back,
+Cloudflare "Just a moment", etc.). The feeds detect these and fall back,
 in order:
 
 1. **[Jina Reader](https://r.jina.ai)** — fetches/renders the page from Jina's
@@ -42,12 +43,29 @@ in order:
    opt out. Sends the article URL to Jina's servers.
 2. **archive.today** — best-effort snapshot fetch (often blocked from
    datacenter IPs, so mostly a last resort).
-3. **Stale-on-error** — if extraction fails on a *re-render* (e.g. an HN 429 on
-   a comments refresh) and we have a previous successful render, the entry keeps
-   serving that last good copy rather than degrading. Kept for `STALE_TTL_MS`.
-4. **Link-out** — if all else fails and there's no prior render to fall back to,
-   the entry shows links to the article, an archive.today snapshot, and the
-   discussion.
+3. **Link-out** — if all else fails and there's no prior render to fall back to
+   (see stale-on-error below), the entry shows links to the article, an
+   archive.today snapshot, and the discussion.
+
+## Caching & freshness
+
+The feed is **rebuilt from a fresh source fetch on every request**, so the story
+list always reflects the current front page. Rebuilds stay cheap because each
+story's rendered content is cached and only re-rendered when stale:
+
+- **Articles** are immutable once published → cached for `ARTICLE_TTL_MS` (24h).
+- **Comments** grow while a story is active → cached only for `COMMENTS_TTL_MS`
+  (30m), then re-rendered to pick up new replies. Item guids are stable, so a
+  refreshed thread updates *in place* in your reader instead of appearing as a
+  duplicate.
+- **Stale-on-error**: if a re-render fails (e.g. an HN 429 on a comments
+  refresh), the last good render keeps being served for up to `STALE_TTL_MS`
+  (24h) rather than degrading to the link-out card — a transient upstream error
+  means "slightly stale," not "unavailable."
+
+With [Upstash/Vercel KV](#configuration) configured, this cache persists across
+serverless cold starts (and is namespaced per deploy, so a new deploy starts
+fresh); without it, an in-memory cache is used per instance.
 
 ## Configuration
 
