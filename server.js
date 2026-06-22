@@ -21,6 +21,18 @@ const ENTRY_TTL_MS = parseInt(process.env.ENTRY_TTL_MS || String(24 * 60 * 60 * 
 const ENTRY_MAX = parseInt(process.env.ENTRY_MAX || '500', 10);
 const FETCH_CONCURRENCY = parseInt(process.env.FETCH_CONCURRENCY || '3', 10);
 
+// Overall wall-clock budget for assembling a feed. Individual fetch timeouts
+// don't bound the whole build: a single front-page story whose host blackholes
+// our datacenter IP can burn ~60s across the direct/Jina/archive tiers (each
+// retried), and a few of those in parallel push the function past Vercel's
+// maxDuration (60s) — failing the *entire* feed with FUNCTION_INVOCATION_TIMEOUT
+// rather than just that one entry. This deadline caps the render phase well
+// under maxDuration; whatever hasn't finished by then is served as a link-out
+// fallback, so the feed always returns valid and on time and slow entries
+// degrade individually. Their in-flight renders still populate the cache when
+// they eventually complete (or get negative-cached), so later builds are fast.
+const BUILD_BUDGET_MS = parseInt(process.env.BUILD_BUDGET_MS || String(45 * 1000), 10);
+
 // Per-kind entry lifetimes. Articles are immutable once published, so they get
 // the long default; discussions are append-only and grow while a story is hot,
 // so comments get a much shorter TTL to re-render and pick up new replies.
@@ -335,8 +347,8 @@ async function buildFeedXml(feed, selfUrl) {
 
   // Per-build tally of how each entry resolved (cache hits vs. fresh renders vs.
   // failures), summarized at the end. getEntryHtml does the per-entry logging.
-  const stats = { l1: 0, l2: 0, rendered: 0, failed: 0, skipped: 0, stale: 0 };
-  await mapWithConcurrency(tasks, FETCH_CONCURRENCY, async (t) => {
+  const stats = { l1: 0, l2: 0, rendered: 0, failed: 0, skipped: 0, stale: 0, budgeted: 0 };
+  const renderAll = mapWithConcurrency(tasks, FETCH_CONCURRENCY, async (t) => {
     try {
       t.item.contentHtml = await getEntryHtml(t.cacheId, t.kind, t.targetUrl, feed.key, t.story, stats);
     } catch (err) {
@@ -349,12 +361,53 @@ async function buildFeedXml(feed, selfUrl) {
     }
   });
 
+  // Cap the render phase at the overall budget. Individual fetch timeouts can
+  // stack (direct/Jina/archive, each retried) well past maxDuration for a single
+  // slow host, so without this the function is killed mid-build and the whole
+  // feed fails. We race the render against the deadline; whatever's still in
+  // flight when it fires is filled in below with a link-out fallback. The
+  // abandoned renders keep running and may still populate the cache for the next
+  // build before the platform freezes the function.
+  let budgetHit = false;
+  let budgetTimer;
+  const budgetGuard = new Promise((resolve) => {
+    budgetTimer = setTimeout(() => {
+      budgetHit = true;
+      resolve();
+    }, Math.max(0, buildStart + BUILD_BUDGET_MS - Date.now()));
+    if (typeof budgetTimer.unref === 'function') budgetTimer.unref();
+  });
+  await Promise.race([renderAll, budgetGuard]);
+  clearTimeout(budgetTimer);
+
+  // Any entry that didn't finish within the budget gets a link-out fallback so
+  // the feed is always complete and valid rather than truncated or timed out.
+  if (budgetHit) {
+    for (const t of tasks) {
+      if (!t.item.contentHtml) {
+        stats.budgeted++;
+        t.item.contentHtml = renderFallback(
+          t.targetUrl,
+          feed.key,
+          t.story,
+          new Error('Render exceeded the build time budget; serving link-out fallback')
+        );
+      }
+    }
+    console.warn(
+      `[build] ${feed.key} hit ${BUILD_BUDGET_MS}ms budget — ${stats.budgeted} entr${
+        stats.budgeted === 1 ? 'y' : 'ies'
+      } served as link-out fallback`
+    );
+  }
+
   // Final tally. If the function times out, this line never prints — the
   // unmatched `[entry] start` line(s) above pinpoint what was still in flight.
   console.log(
     `[build] ${feed.key} done in ${Date.now() - buildStart}ms — ${tasks.length} entries ` +
       `(L1 ${stats.l1}, L2 ${stats.l2}, rendered ${stats.rendered}, ` +
-      `failed ${stats.failed}, neg-skipped ${stats.skipped}, stale-served ${stats.stale})`
+      `failed ${stats.failed}, neg-skipped ${stats.skipped}, stale-served ${stats.stale}, ` +
+      `budgeted ${stats.budgeted})`
   );
 
   return buildRss(feed, items, selfUrl);
