@@ -87,6 +87,61 @@ const lastGoodStore = createKvStore({
   ttlMs: STALE_TTL_MS,
 });
 
+// Last-good cache for the *source story list* itself. Per-story rendered content
+// is cached above, but the result of the one source RSS fetch per build — the
+// list of stories — was not, so a slow or failed source fetch took down the
+// whole feed with a 500 even when every entry was still cached. hnrss.org (the
+// HN source) has flaky days where it stalls or errors; that shouldn't break the
+// feed. We hold the last good parsed list far longer than a build interval and
+// fall back to it when a fetch fails, so a transient source outage degrades to a
+// slightly stale front page instead of a dead feed. Refreshed on every
+// successful fetch, so it only ages during an outage. KV values are strings, so
+// the list is JSON-encoded into L2. Mirrors the entry caches' L1 + L2 layering.
+const SOURCE_STALE_TTL_MS = parseInt(
+  process.env.SOURCE_STALE_TTL_MS || String(6 * 60 * 60 * 1000),
+  10
+);
+const sourceCache = new BoundedCache({ maxEntries: 16, ttlMs: SOURCE_STALE_TTL_MS });
+const sourceStore = createKvStore({
+  keyPrefix: `offlinerss:${RENDER_VERSION}:source:`,
+  ttlMs: SOURCE_STALE_TTL_MS,
+});
+
+// Fetch the source story list, but never let a slow/failed source fetch break an
+// otherwise-serveable feed. On success, refresh the last-good copy (L1 + L2). On
+// failure, fall back to the last good list (L1 then L2). Only a failure with no
+// prior list to fall back to propagates (a genuine cold first failure).
+async function getSourceItems(feed) {
+  try {
+    const items = await fetchSourceItems(feed);
+    sourceCache.set(feed.key, items);
+    await sourceStore.set(feed.key, JSON.stringify(items));
+    return { items, stale: false };
+  } catch (err) {
+    const local = sourceCache.get(feed.key);
+    if (local) {
+      console.warn(
+        `[build] ${feed.key} source fetch failed (${err.message}); serving last-good list (L1, ${local.length} stories)`
+      );
+      return { items: local, stale: true };
+    }
+    const remoteRaw = await sourceStore.get(feed.key);
+    if (remoteRaw) {
+      try {
+        const remote = JSON.parse(remoteRaw);
+        sourceCache.set(feed.key, remote);
+        console.warn(
+          `[build] ${feed.key} source fetch failed (${err.message}); serving last-good list (L2, ${remote.length} stories)`
+        );
+        return { items: remote, stale: true };
+      } catch {
+        // Corrupt L2 value — fall through to rethrow.
+      }
+    }
+    throw err;
+  }
+}
+
 // Each feed is reassembled from a fresh source fetch on every request, so the
 // story list always reflects the current front page (nothing falls through a
 // stale-feed window). This stays cheap because per-story rendered content is
@@ -297,8 +352,11 @@ async function buildFeedXml(feed, selfUrl) {
   // Query the source feed once. Each source story becomes two output items, in
   // original order: the reader-mode article, then its discussion.
   const srcStart = Date.now();
-  const sources = await fetchSourceItems(feed);
-  console.log(`[build] ${feed.key} source: ${sources.length} stories in ${Date.now() - srcStart}ms`);
+  const { items: sources, stale: sourceStale } = await getSourceItems(feed);
+  console.log(
+    `[build] ${feed.key} source: ${sources.length} stories in ${Date.now() - srcStart}ms` +
+      (sourceStale ? ' (STALE — live source fetch failed, served last-good list)' : '')
+  );
 
   const items = [];
   const tasks = [];
