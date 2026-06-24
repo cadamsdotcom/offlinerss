@@ -25,13 +25,24 @@ const FETCH_CONCURRENCY = parseInt(process.env.FETCH_CONCURRENCY || '3', 10);
 // don't bound the whole build: a single front-page story whose host blackholes
 // our datacenter IP can burn ~60s across the direct/Jina/archive tiers (each
 // retried), and a few of those in parallel push the function past Vercel's
-// maxDuration (60s) — failing the *entire* feed with FUNCTION_INVOCATION_TIMEOUT
-// rather than just that one entry. This deadline caps the render phase well
+// maxDuration — failing the *entire* feed with FUNCTION_INVOCATION_TIMEOUT
+// rather than just that one entry. This deadline caps the render phase a margin
 // under maxDuration; whatever hasn't finished by then is served as a link-out
 // fallback, so the feed always returns valid and on time and slow entries
 // degrade individually. Their in-flight renders still populate the cache when
 // they eventually complete (or get negative-cached), so later builds are fast.
-const BUILD_BUDGET_MS = parseInt(process.env.BUILD_BUDGET_MS || String(45 * 1000), 10);
+//
+// The budget is derived from maxDuration so the two can't silently drift: it
+// must stay under the platform's kill timer, but only by enough to cover the
+// after-the-deadline work (assemble + gzip the feed is ~50ms; the rest of the
+// headroom absorbs setTimeout jitter — the deadline races synchronous HTML
+// parses that block the event loop — plus cold-start and egress). Keep
+// MAX_DURATION_MS in sync with vercel.json's maxDuration. BUILD_BUDGET_MS still
+// works as an explicit override for anyone who wants to pin the budget directly.
+const MAX_DURATION_MS = parseInt(process.env.MAX_DURATION_MS || String(60 * 1000), 10);
+const BUDGET_HEADROOM_MS = parseInt(process.env.BUDGET_HEADROOM_MS || String(8 * 1000), 10);
+const BUILD_BUDGET_MS =
+  parseInt(process.env.BUILD_BUDGET_MS, 10) || Math.max(1000, MAX_DURATION_MS - BUDGET_HEADROOM_MS);
 
 // Per-kind entry lifetimes. Articles are immutable once published, so they get
 // the long default; discussions are append-only and grow while a story is hot,
