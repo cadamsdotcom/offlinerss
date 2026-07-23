@@ -15,13 +15,19 @@ differently.
 | `/lobsters.xml` | Lobsters top stories (past week) |
 
 Each source feed is queried **once per request** (the feed is rebuilt fresh
-every time — see [Caching & freshness](#caching--freshness)), and every story
-produces **two items**, in the source's original order:
+every time — see [Caching & freshness](#caching--freshness)), and each
+external-link story produces **two items**, in the source's original order:
 
 1. **`Article: <title>`** — the full article body extracted via reader mode
    (comments, nav, and boilerplate stripped).
 2. **`Comments: <title>`** — the HN/Lobsters discussion rendered as clean,
    threaded comments.
+
+**Self/text posts** (Ask HN, Lobsters discussions, etc.) point at their own
+discussion page rather than an external article, so splitting them would be
+redundant — the discussion view already renders the post's body above the
+thread. These produce a **single, unprefixed item** (`<title>` with no
+`Article:`/`Comments:` prefix) rendered as that discussion.
 
 Article extraction uses
 [Mozilla Readability](https://github.com/mozilla/readability) (the engine behind
