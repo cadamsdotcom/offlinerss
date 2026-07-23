@@ -380,6 +380,33 @@ async function buildFeedXml(feed, selfUrl) {
       commentsUrl: src.commentsUrl,
     };
 
+    // Self/text posts (Ask HN, Lobsters discussions, etc.) have no external
+    // article: their `link` is the discussion page itself. Splitting those into
+    // "Article" + "Comments" is redundant — the discussion view already renders
+    // the post's own body above the thread — so emit a single, unprefixed item
+    // rendered as the discussion. External-link stories still get the split.
+    const isSelfPost = !src.link || src.link === src.commentsUrl;
+    if (isSelfPost) {
+      const target = src.commentsUrl || src.link;
+      // Keep the `comments:` cache/guid namespace so this render shares a cache
+      // key with the discussion view and stays stable if the post ever sprouts
+      // an external link and re-splits.
+      const selfItem = {
+        title: src.title,
+        link: target,
+        guid: `comments:${src.id}`,
+        pubDate: src.pubDate,
+        author: src.author,
+        commentsUrl: src.commentsUrl,
+        origDescription: src.origDescription,
+      };
+      items.push(selfItem);
+      if (target) {
+        tasks.push({ item: selfItem, kind: 'comments', cacheId: `comments:${src.id}`, targetUrl: target, story });
+      }
+      continue;
+    }
+
     const articleItem = {
       title: `Article: ${src.title}`,
       link: src.link || src.commentsUrl,
@@ -519,10 +546,12 @@ app.get('/', async (req, res) => {
   const kv = await kvStatus();
   res.send(`
     <h1>offlinerss</h1>
-    <p>HN and Lobsters feeds for offline reading. Each story appears as two
-    items in the source's order: an <em>Article:</em> item with the full body
-    extracted via reader mode (comments stripped), followed by a
-    <em>Comments:</em> item with the threaded discussion.</p>
+    <p>HN and Lobsters feeds for offline reading. Each external-link story
+    appears as two items in the source's order: an <em>Article:</em> item with
+    the full body extracted via reader mode (comments stripped), followed by a
+    <em>Comments:</em> item with the threaded discussion. Self/text posts (Ask
+    HN, Lobsters discussions) that link to their own thread appear as a single
+    unprefixed item rendered as that discussion.</p>
     <ul>
       ${Object.values(FEEDS)
         .map(
