@@ -15,19 +15,22 @@ differently.
 | `/lobsters.xml` | Lobsters top stories (past week) |
 
 Each source feed is queried **once per request** (the feed is rebuilt fresh
-every time — see [Caching & freshness](#caching--freshness)), and each
-external-link story produces **two items**, in the source's original order:
+every time — see [Caching & freshness](#caching--freshness)), and each story
+produces **one item**, in the source's original order, containing:
 
-1. **`Article: <title>`** — the full article body extracted via reader mode
-   (comments, nav, and boilerplate stripped).
-2. **`Comments: <title>`** — the HN/Lobsters discussion rendered as clean,
-   threaded comments.
+1. **The article** — the full body extracted via reader mode (comments, nav,
+   and boilerplate stripped), wrapped in a collapsible `<details>` block (open
+   by default) whose byline is the toggle, so it can be folded away.
+2. **The discussion** — the HN/Lobsters thread rendered as clean, threaded
+   comments, each collapsible the same way.
+
+The two halves are still rendered and cached separately (`article:` /
+`comments:` keys with their own TTLs), so refreshing comments never re-fetches
+the article. If one half fails, only that half shows a link-out fallback.
 
 **Self/text posts** (Ask HN, Lobsters discussions, etc.) point at their own
-discussion page rather than an external article, so splitting them would be
-redundant — the discussion view already renders the post's body above the
-thread. These produce a **single, unprefixed item** (`<title>` with no
-`Article:`/`Comments:` prefix) rendered as that discussion.
+discussion page rather than an external article, so they're rendered as just
+that discussion, with the post's own body (also collapsible) above the thread.
 
 Article extraction uses
 [Mozilla Readability](https://github.com/mozilla/readability) (the engine behind

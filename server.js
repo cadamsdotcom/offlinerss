@@ -312,13 +312,6 @@ function rfc822(dateStr) {
   return (isNaN(d.getTime()) ? new Date() : d).toUTCString();
 }
 
-// Return an RFC-822 date `ms` milliseconds before the given date string, or the
-// original value when it isn't a parseable date.
-function olderBy(dateStr, ms) {
-  const t = Date.parse(dateStr || '');
-  return isNaN(t) ? dateStr : new Date(t - ms).toUTCString();
-}
-
 function buildRss(feed, items, selfUrl) {
   const parts = [];
   parts.push('<?xml version="1.0" encoding="UTF-8"?>');
@@ -360,8 +353,8 @@ function buildRss(feed, items, selfUrl) {
 
 async function buildFeedXml(feed, selfUrl) {
   const buildStart = Date.now();
-  // Query the source feed once. Each source story becomes two output items, in
-  // original order: the reader-mode article, then its discussion.
+  // Query the source feed once. Each source story becomes one output item, in
+  // original order: the reader-mode article (collapsible) above its discussion.
   const srcStart = Date.now();
   const { items: sources, stale: sourceStale } = await getSourceItems(feed);
   console.log(
@@ -381,16 +374,14 @@ async function buildFeedXml(feed, selfUrl) {
     };
 
     // Self/text posts (Ask HN, Lobsters discussions, etc.) have no external
-    // article: their `link` is the discussion page itself. Splitting those into
-    // "Article" + "Comments" is redundant — the discussion view already renders
-    // the post's own body above the thread — so emit a single, unprefixed item
-    // rendered as the discussion. External-link stories still get the split.
+    // article: their `link` is the discussion page itself, and the discussion
+    // view already renders the post's own body above the thread — so render
+    // just the discussion.
     const isSelfPost = !src.link || src.link === src.commentsUrl;
     if (isSelfPost) {
       const target = src.commentsUrl || src.link;
       // Keep the `comments:` cache/guid namespace so this render shares a cache
-      // key with the discussion view and stays stable if the post ever sprouts
-      // an external link and re-splits.
+      // key with the discussion half of a combined item.
       const selfItem = {
         title: src.title,
         link: target,
@@ -407,53 +398,53 @@ async function buildFeedXml(feed, selfUrl) {
       continue;
     }
 
-    const articleItem = {
-      title: `Article: ${src.title}`,
-      link: src.link || src.commentsUrl,
-      guid: `article:${src.id}`,
+    // External-link stories become one item holding both renders: the
+    // reader-mode article (a collapsible block, open by default) followed by
+    // the threaded discussion. The two halves are still rendered and cached
+    // separately — under their own `article:`/`comments:` keys and TTLs, so a
+    // comments refresh never re-fetches the immutable article — and stitched
+    // together once both have resolved (see combineParts below).
+    const storyItem = {
+      title: src.title,
+      link: src.link,
+      guid: `story:${src.id}`,
       pubDate: src.pubDate,
       author: src.author,
       commentsUrl: src.commentsUrl,
-    };
-    const commentsItem = {
-      title: `Comments: ${src.title}`,
-      link: src.commentsUrl,
-      guid: `comments:${src.id}`,
-      // Same story time as the article, minus one second. Readers sort the
-      // timeline by date (newest first) and break ties internally, which made
-      // the pair flip. Nudging Comments 1s older keeps it directly below its
-      // Article (which keeps the real pubDate) without distorting the time.
-      pubDate: olderBy(src.pubDate, 1000),
-      author: src.author,
-      commentsUrl: src.commentsUrl,
       origDescription: src.origDescription,
+      parts: {},
     };
-    items.push(articleItem, commentsItem);
-
-    // Self/text posts have no external article; fall back to the discussion
-    // page as the article target (reader mode extracts the post body).
-    const articleTarget = src.link || src.commentsUrl;
-    if (articleTarget) {
-      tasks.push({ item: articleItem, kind: 'article', cacheId: `article:${src.id}`, targetUrl: articleTarget, story });
-    }
+    items.push(storyItem);
+    tasks.push({ item: storyItem, part: 'article', kind: 'article', cacheId: `article:${src.id}`, targetUrl: src.link, story });
     if (src.commentsUrl) {
-      tasks.push({ item: commentsItem, kind: 'comments', cacheId: `comments:${src.id}`, targetUrl: src.commentsUrl, story });
+      tasks.push({ item: storyItem, part: 'comments', kind: 'comments', cacheId: `comments:${src.id}`, targetUrl: src.commentsUrl, story });
     }
   }
+
+  // Where a task's rendered HTML goes: its slot in a combined item, or the
+  // item's whole content for single-part (self-post) items. A part that fails
+  // gets a compact fallback (no title banner) since it sits inside an item.
+  const has = (t) => (t.part ? t.item.parts[t.part] : t.item.contentHtml);
+  const put = (t, html) => {
+    if (t.part) t.item.parts[t.part] = html;
+    else t.item.contentHtml = html;
+  };
+  const fallback = (t, err) =>
+    renderFallback(t.targetUrl, feed.key, t.story, err, { compact: Boolean(t.part) });
 
   // Per-build tally of how each entry resolved (cache hits vs. fresh renders vs.
   // failures), summarized at the end. getEntryHtml does the per-entry logging.
   const stats = { l1: 0, l2: 0, rendered: 0, failed: 0, skipped: 0, stale: 0, budgeted: 0 };
   const renderAll = mapWithConcurrency(tasks, FETCH_CONCURRENCY, async (t) => {
     try {
-      t.item.contentHtml = await getEntryHtml(t.cacheId, t.kind, t.targetUrl, feed.key, t.story, stats);
+      put(t, await getEntryHtml(t.cacheId, t.kind, t.targetUrl, feed.key, t.story, stats));
     } catch (err) {
       // Surface the failure in the entry itself (with links out) instead of
       // silently falling back to a bare description, so it's diagnosable. The
       // failure is negative-cached (short TTL) in getEntryHtml, so the next few
       // builds serve this fallback cheaply instead of re-attempting the render.
       // getEntryHtml already logged the failure/skip; no need to log again here.
-      t.item.contentHtml = renderFallback(t.targetUrl, feed.key, t.story, err);
+      put(t, fallback(t, err));
     }
   });
 
@@ -480,14 +471,9 @@ async function buildFeedXml(feed, selfUrl) {
   // the feed is always complete and valid rather than truncated or timed out.
   if (budgetHit) {
     for (const t of tasks) {
-      if (!t.item.contentHtml) {
+      if (!has(t)) {
         stats.budgeted++;
-        t.item.contentHtml = renderFallback(
-          t.targetUrl,
-          feed.key,
-          t.story,
-          new Error('Render exceeded the build time budget; serving link-out fallback')
-        );
+        put(t, fallback(t, new Error('Render exceeded the build time budget; serving link-out fallback')));
       }
     }
     console.warn(
@@ -495,6 +481,14 @@ async function buildFeedXml(feed, selfUrl) {
         stats.budgeted === 1 ? 'y' : 'ies'
       } served as link-out fallback`
     );
+  }
+
+  // Stitch each combined item's halves together, article first.
+  for (const item of items) {
+    if (item.parts) {
+      item.contentHtml = [item.parts.article, item.parts.comments].filter(Boolean).join('');
+      delete item.parts;
+    }
   }
 
   // Final tally. If the function times out, this line never prints — the
@@ -546,12 +540,11 @@ app.get('/', async (req, res) => {
   const kv = await kvStatus();
   res.send(`
     <h1>offlinerss</h1>
-    <p>HN and Lobsters feeds for offline reading. Each external-link story
-    appears as two items in the source's order: an <em>Article:</em> item with
-    the full body extracted via reader mode (comments stripped), followed by a
-    <em>Comments:</em> item with the threaded discussion. Self/text posts (Ask
-    HN, Lobsters discussions) that link to their own thread appear as a single
-    unprefixed item rendered as that discussion.</p>
+    <p>HN and Lobsters feeds for offline reading. Each story is one item, in
+    the source's order: the full article body extracted via reader mode, in a
+    collapsible block, followed by the threaded discussion. Self/text posts (Ask
+    HN, Lobsters discussions) that link to their own thread are rendered as that
+    discussion.</p>
     <ul>
       ${Object.values(FEEDS)
         .map(
