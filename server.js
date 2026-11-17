@@ -23,8 +23,8 @@ const FETCH_CONCURRENCY = parseInt(process.env.FETCH_CONCURRENCY || '3', 10);
 
 // Overall wall-clock budget for assembling a feed. Individual fetch timeouts
 // don't bound the whole build: a single front-page story whose host blackholes
-// our datacenter IP can burn ~60s across the direct/Jina/archive tiers (each
-// retried), and a few of those in parallel push the function past Vercel's
+// our datacenter IP can burn ~60s across the direct/Jina/archive/Wayback tiers
+// (each retried), and a few of those in parallel push the function past Vercel's
 // maxDuration — failing the *entire* feed with FUNCTION_INVOCATION_TIMEOUT
 // rather than just that one entry. This deadline caps the render phase a margin
 // under maxDuration; whatever hasn't finished by then is served as a link-out
@@ -449,8 +449,8 @@ async function buildFeedXml(feed, selfUrl) {
   });
 
   // Cap the render phase at the overall budget. Individual fetch timeouts can
-  // stack (direct/Jina/archive, each retried) well past maxDuration for a single
-  // slow host, so without this the function is killed mid-build and the whole
+  // stack (direct/Jina/archive/Wayback, each retried) well past maxDuration for
+  // a single slow host, so without this the function is killed mid-build and the whole
   // feed fails. We race the render against the deadline; whatever's still in
   // flight when it fires is filled in below with a link-out fallback. The
   // abandoned renders keep running and may still populate the cache for the next

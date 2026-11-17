@@ -65,7 +65,10 @@ in order:
    opt out. Sends the article URL to Jina's servers.
 2. **archive.today** — best-effort snapshot fetch (often blocked from
    datacenter IPs, so mostly a last resort).
-3. **Link-out** — if all else fails and there's no prior render to fall back to
+3. **[Wayback Machine](https://web.archive.org)** — the closest archive.org
+   snapshot, fetched raw (no toolbar), on by default. Set `WAYBACK=0` to opt
+   out. Sends the article URL to archive.org.
+4. **Link-out** — if all else fails and there's no prior render to fall back to
    (see stale-on-error below), the entry shows links to the article, an
    archive.today snapshot, and the discussion.
 
@@ -106,6 +109,7 @@ see `.env.example`).
 | `FETCH_CONCURRENCY` | `3` | Parallel page fetches per feed build |
 | `JINA_READER` | _(on)_ | Set `0`/`false`/`off`/`no` to disable the Jina fallback |
 | `JINA_API_KEY` | _(none)_ | Optional; raises Jina's rate limit |
+| `WAYBACK` | _(on)_ | Set `0`/`false`/`off`/`no` to disable the Wayback Machine fallback |
 | `KV_REST_API_URL` / `KV_REST_API_TOKEN` | _(none)_ | Optional Upstash/Vercel KV for a persistent cache across cold starts |
 
 ## Running
